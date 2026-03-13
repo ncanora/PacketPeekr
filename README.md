@@ -1,110 +1,150 @@
-# Peekr 👀
+# Peekr
 
-A real-time local network monitoring dashboard. Peekr passively observes traffic on your network interface, tracks connected devices, flags unknown devices, and uses an LLM to explain suspicious behavior — all from a clean web UI.
+A real-time network monitoring tool with algorithmic attack detection and LLM-assisted log analysis. Built with React + TypeScript (frontend) and Go + gopacket (backend).
 
-> **Passive only** — Peekr never sends packets or probes your network. It only listens.
+---
+
+## Architecture
+
+![Peekr architecture diagram](architecture.png)
+
+### File breakdown
+
+| File | Responsibility |
+|---|---|
+| `devices.go` | One-time setup: enumerate interfaces, resolve own IP, return `pcap.Handle` |
+| `net.go` | Two goroutines: capture loop → ring buffer, broadcast goroutine → SSE |
+| `analyzer.go` | Reads ring buffer concurrently, runs local detection rules, pushes to alert channel |
+| `llm.go` | Consumes alert channel + user requests, builds context, calls LLM API |
+| `logger.go` | Structured JSON logging; doubles as LLM long-term context |
+
+### Data flow
+
+**Live feed**
+```
+gopacket capture → ring buffer → broadcast goroutine → SSE → React packet table
+```
+
+**Attack detection** (fully local, no API calls)
+```
+ring buffer → analyzer goroutine → Alert{severity, type, evidence} → alert channel → React alert panel
+```
+
+**LLM mode 1 — log selection**
+```
+user selects rows → "Ask LLM" button → POST /api/llm/selection
+→ llm.go builds tight context from selected rows → Anthropic API → React chat panel
+```
+
+**LLM mode 2 — generic chat**
+```
+user clicks chat button → POST /api/llm/chat
+→ llm.go injects recent log tail as background context → Anthropic API → React chat panel
+```
+
+### Detectors (`analyzer.go`)
+
+Each detector is stateful and self-contained, reading from the shared ring buffer.
+
+| Detector | Technique |
+|---|---|
+| ARP spoofing | IP→MAC table; flag when MAC changes for a known IP or unsolicited ARP replies appear |
+| Port scan | Count distinct dst ports per src IP in a rolling time window |
+| SYN flood | Count SYNs without corresponding ACKs per src |
+| DNS poisoning | Flag unsolicited DNS replies or mismatched transaction IDs |
+| ICMP flood | Volume threshold per src within a time window |
+
+### LLM integration
+
+`llm.go` exposes two HTTP handlers. Both inject recent log context automatically — the difference is only what goes in the user message:
+
+- `POST /api/llm/selection` — tight context: selected packet rows + "what is happening here?"
+- `POST /api/llm/chat` — open context: recent log tail + user's free-form question
+
+The React chat panel persists conversation history client-side and sends it on each request so the LLM maintains context across turns.
 
 ---
 
 ## Stack
 
-| Layer | Technology |
-|---|---|
-| Packet Capture | Go + [gopacket](https://github.com/google/gopacket) |
-| Backend API | Go + [Gin](https://gin-gonic.com/) |
-| Real-time Events | Go + [Gorilla WebSockets](https://github.com/gorilla/websocket) |
-| Database | SQLite via [go-sqlite3](https://github.com/mattn/go-sqlite3) |
-| Frontend | React + TypeScript (Vite) |
-| Styling | Tailwind CSS v3 |
-| Charts | Recharts |
-| LLM Analysis | Anthropic API (planned) |
-
----
-
-## Prerequisites
-
-### Windows
-1. **Go 1.21+**
-   - Download: https://golang.org/dl/
-   - Verify: `go version`
-
-2. **Node.js 22+**
-   - Download: https://nodejs.org/
-   - Or via nvm: `nvm install 22 && nvm use 22`
-   - Verify: `node -v`
-
-3. **Npcap** (required for packet capture on Windows)
-   - Download: https://npcap.com/#download
-   - During install, check **"WinPcap API Compatible Mode"**
-   - Leave all other options default
-
-### macOS / Linux
-Npcap is not needed — libpcap is built in. Just install Go and Node.
+- **Frontend**: React 19 + TypeScript + Vite
+- **Backend**: Go + [gopacket](https://github.com/google/gopacket)
+- **LLM**: Anthropic API (via `llm.go`)
+- **Transport**: SSE for live packet stream, REST for LLM queries
 
 ---
 
 ## Getting Started
 
-### 1. Clone the repo
-```bash
-git clone https://github.com/ncanora/peekr.git
-cd peekr
-```
+### Prerequisites
 
-### 2. Backend
+- Go 1.21+
+- Node.js 18+
+- libpcap (`sudo apt install libpcap-dev` / `brew install libpcap`)
+
+### Backend
+
 ```bash
 cd backend
 go mod tidy
-go run cmd/peekr/main.go
+sudo go run main.go   # sudo required for raw packet capture
 ```
-Backend runs on `http://localhost:8080`
 
-> **Windows note:** Must run as Administrator for packet capture permissions.
+### Frontend
 
-### 3. Frontend
 ```bash
-cd frontend
 npm install
 npm run dev
 ```
-Frontend runs on `http://localhost:5173`
 
 ---
 
-## Project Structure
+## Development / Lab Setup
+
+For safe testing without a shared network, use a personal hotspot or host-only VM network:
 
 ```
-peekr/
-├── backend/
-│   ├── cmd/peekr/        # Entry point
-│   └── internal/
-│       ├── capture/      # Packet capture engine (gopacket)
-│       ├── devices/      # SQLite device store
-│       └── api/          # REST + WebSocket server (Gin)
-├── frontend/
-│   └── src/
-│       ├── components/   # React UI components
-│       └── hooks/        # Custom React hooks (WebSocket, fetch)
-└── README.md
+[Machine A — victim]  ←── hotspot / host-only ───→  [Machine B — attacker]
 ```
 
----
+Simulate an ARP spoofing attack against your own device:
 
-## Features (Roadmap)
+```bash
+sudo apt install dsniff
+sudo arpspoof -i eth0 -t <victim_ip> <gateway_ip>
+sudo arpspoof -i eth0 -t <gateway_ip> <victim_ip>
+```
 
-- [x] Project scaffold
-- [ ] Packet capture — MAC/IP/protocol detection
-- [ ] Device tracking — first seen, last seen, traffic volume
-- [ ] Unknown device alerts via WebSocket
-- [ ] REST API — device list, traffic stats
-- [ ] React dashboard — live device table, traffic graphs
-- [ ] LLM behavioral analysis — explain suspicious patterns
-- [ ] Local anomaly detection model (CICIDS dataset)
+Peekr's ARP detector will flag the attack in the alert panel in real time.
 
 ---
 
-## Notes
+## Vite / ESLint Notes
 
-- Peekr only inspects packet **headers** (MAC, IP, port, protocol flags). It never reads packet payloads.
-- Built and tested on Windows 11 with Npcap. Also compatible with Linux/macOS.
-- Run the backend as Administrator on Windows to allow raw packet capture.
+### Type-aware lint rules
+
+```js
+export default defineConfig([
+  globalIgnores(['dist']),
+  {
+    files: ['**/*.{ts,tsx}'],
+    extends: [
+      tseslint.configs.recommendedTypeChecked,
+      tseslint.configs.strictTypeChecked,
+      tseslint.configs.stylisticTypeChecked,
+    ],
+    languageOptions: {
+      parserOptions: {
+        project: ['./tsconfig.node.json', './tsconfig.app.json'],
+        tsconfigRootDir: import.meta.dirname,
+      },
+    },
+  },
+])
+```
+
+Optionally add [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific rules.
+
+### React Compiler
+
+Not enabled by default due to build performance impact. See the [React Compiler docs](https://react.dev/learn/react-compiler/installation) to add it.
