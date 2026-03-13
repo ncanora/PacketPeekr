@@ -1,8 +1,8 @@
-# Peekr
+# PacketPeekr
 
 A real-time network monitoring tool with algorithmic attack detection and LLM-assisted log analysis. Built with React + TypeScript (frontend) and Go + gopacket (backend).
 
-![Peekr UI prototype](ui_proto.png)
+![PacketPeekr UI prototype](ui_proto.png)
 
 *UI Prototype
 
@@ -10,7 +10,7 @@ A real-time network monitoring tool with algorithmic attack detection and LLM-as
 
 ## Architecture
 
-![Peekr architecture diagram](architecture.png)
+![PacketPeekr architecture diagram](architecture.png)
 
 ### File breakdown
 
@@ -120,7 +120,7 @@ sudo arpspoof -i eth0 -t <victim_ip> <gateway_ip>
 sudo arpspoof -i eth0 -t <gateway_ip> <victim_ip>
 ```
 
-Peekr's ARP detector will flag the attack in the alert panel in real time.
+PacketPeekr's ARP detector will flag the attack in the alert panel in real time.
 
 ---
 
